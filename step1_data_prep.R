@@ -60,19 +60,4 @@ write.csv(dataset, "/FILEPATH/anxiety_mrbrt.csv", row.names=F)
 length(dataset[, Study.Name]) # Number of estimates
 length(dataset[, unique(Study.Name)]) # Number of studies
 
-# number of psychologist vists in past 12 months
-#SR72CFB
-
-# number of specialist mental health prof in past 12 months
-#SR95CFB
-
-# Recieved CBT in past 12 months?
-#TYPHELPD
-
-
-
-# 1997 survey has usable data on psychotherapy, but not medication (medication is yes/no to any medication)
-# NCS 2001/2002 has usable data on medication but not psychotherapy
-
-
 
