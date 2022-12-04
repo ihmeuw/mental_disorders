@@ -3,6 +3,7 @@
 ### Adjust anxiety disorder severity splits to account for treatemnt
 ###
 #####################################################################################
+
 rm(list = ls())
 
 library(data.table)
@@ -12,12 +13,13 @@ library(ggplot2)
 library(openxlsx)
 source("/FILEPATH/mr_brt_functions.R")
 source("/FILEPATH/get_covariate_estimates.R")
-source("/FILEPATH/get_draws.R")
+source("/FILEPATHr/get_draws.R")
 source("/FILEPATH/get_location_metadata.R")
 source("/FILEPATH/get_population.R")
 library(mrbrt001, lib.loc = '/FILEPATH/')
 rlogit <- function(x){exp(x)/(1+exp(x))}
 logit <- function(x){log(x/(1-x))}
+
 
 set.seed(645823) 
 
@@ -33,7 +35,7 @@ FCOT[, draw := paste0("draw_", as.numeric(gsub("draw_", "", draw))-1)]
 anxiety_dws <- fread("/FILEPATH/anxiety_dw_distributions.csv")
 anxiety_dws[, dw_t := dw_ds]
 
-## Bring in SF-12 to DW model
+## conduct standard SF-12 to DW model and estimate an sf-12 score for each person attributable to anxiety disorders
 dw_map_model <- py_load_object(filename = "/FILEPATH/sf12_to_dw.pkl", pickle = "dill")
 
 dw_map <- data.table(intercept = 1, sf12_c = seq(40, 120, 0.01)-120)
@@ -154,10 +156,9 @@ plot <- ggplot(hist_data[, .(Scenario, dw_val = ifelse(dw_val == 0, -0.02, dw_va
   xlab("\nDisability Weight") +
   theme(legend.position="top")
 plot
-ggsave(plot, filename="/FILEPATH/figure_anxiety_dw_shift.pdf", width = 10, height = 6)
+ggsave(plot, filename="/FILEPATH/figure_2.pdf", width = 10, height = 6)
 
 # continue analysis
-
 anxiety_dws <- merge(anxiety_dws, data, by = "draw", allow.cartesian=TRUE)
 
 anxiety_dws[severity == 0, case_severity := ifelse(dw_t <= 0, 1, 0)]
@@ -205,6 +206,7 @@ unique(anxiety_dws[, .(dw_mean = mean(dw_mean), lower = quantile(dw_mean, 0.025)
 
 anxiety_dws[, dw_adj_factor := dw_mean/dw_mean_adj]
 anxiety_dws[, dw_fcot_factor := dw_mean/dw_mean_fcot]
+
 adj_factor <- unique(anxiety_dws[,.(draw, dw_adj_factor)])
 adj_factor[,.(dw_adj_factor = mean(dw_adj_factor), lower = quantile(dw_adj_factor, 0.025), upper = quantile(dw_adj_factor, 0.975))]
 
@@ -221,41 +223,62 @@ percent_averted_in_nsmhwb[, change := (adj_dw-raw_dw)/adj_dw]
 percent_averted_in_nsmhwb[,.(mean(change), quantile(change, 0.025), quantile(change, 0.975))]
 
 ##### Predict adjustment factor by HAQI  #####
-adj_factor[, haqi := 0]
+min_haqi <- fread("/FILEPATH/min_haqi_draws.csv")
+adj_factor <- merge(adj_factor, min_haqi[,.(draw, haqi = min_haqi)], by = 'draw')
 
 haqi <- get_covariate_estimates(covariate_id = 1099, location_id = 71, year_id = c(1997), gbd_round_id = 6, decomp_step = "step4")
 
-haqi <- data.table(draw = paste0("draw_", 0:999), dw_adj_factor = 1, haqi = rnorm(1000, haqi$mean_value, (haqi$upper_value - haqi$lower_value)/(qnorm(0.975, 0, 1)*2)))
+haqi <- data.table(draw = paste0("draw_", 0:999),haqi = rnorm(1000, haqi$mean_value, (haqi$upper_value - haqi$lower_value)/(qnorm(0.975, 0, 1)*2)))
 
-adj_factor <- rbind(adj_factor, haqi)
+observed <- merge(haqi, anxiety_dws[, .(draw, sev_prop, severity)], by = 'draw')
+
+no_treatment <- merge(min_haqi[, .(draw, haqi = min_haqi)], anxiety_dws[, .(draw, sev_prop = sev_prop_adj, severity)], by = 'draw')
+
+adj_factor <- rbind(observed, no_treatment)
 
 pred_matrix <- data.table(expand.grid(haqi = seq(0, 100, 0.5), draw = paste0("draw_", 0:999)))
+pred_matrix <- merge(pred_matrix, observed[,.(draw, severity)], by = 'draw', allow.cartesian = T)
 
-interpolation_betas <- data.table(draw = paste0("draw_", 0:999))
 for(d in paste0("draw_", 0:999)){
-  adj_mod<-lm(dw_adj_factor~haqi,subset = (draw == d), data = adj_factor)
+  mod_asymp <- lm(sev_prop~haqi,subset = (draw == d & severity == 0), data = adj_factor)
+  mod_mild <- lm(sev_prop~haqi,subset = (draw == d & severity == 1), data = adj_factor)
+  mod_mod <- lm(sev_prop~haqi,subset = (draw == d & severity == 2), data = adj_factor)
+  mod_sev <- lm(sev_prop~haqi,subset = (draw == d & severity == 3), data = adj_factor)
   new <- data.frame(haqi = seq(0, 100, 0.5))
-  pred_matrix[draw == d, adj_factor := predict(adj_mod, newdata = new)]
-  interpolation_betas[draw == d, haqi_beta := adj_mod$coefficients["haqi"]]
+  pred_matrix[draw == d & severity == 0, sev_prop := predict(mod_asymp, newdata = new)]
+  pred_matrix[draw == d & severity == 1, sev_prop := predict(mod_mild, newdata = new)]
+  pred_matrix[draw == d & severity == 2, sev_prop := predict(mod_mod, newdata = new)]
+  pred_matrix[draw == d & severity == 3, sev_prop := predict(mod_sev, newdata = new)]
+  asymp_haqi_floor <- no_treatment[draw == d & severity == 0, sev_prop]
+  mild_haqi_floor <- no_treatment[draw == d & severity == 1, sev_prop]
+  mod_haqi_floor <- no_treatment[draw == d & severity == 2, sev_prop]
+  sev_haqi_floor <- no_treatment[draw == d & severity == 3, sev_prop]
+  pred_matrix[draw == d & severity == 0 & haqi <= min_haqi[draw == d, round(min_haqi/0.5)*0.5], sev_prop := asymp_haqi_floor]
+  pred_matrix[draw == d & severity == 1 & haqi <= min_haqi[draw == d, round(min_haqi/0.5)*0.5], sev_prop := mild_haqi_floor]
+  pred_matrix[draw == d & severity == 2 & haqi <= min_haqi[draw == d, round(min_haqi/0.5)*0.5], sev_prop := mod_haqi_floor]
+  pred_matrix[draw == d & severity == 3 & haqi <= min_haqi[draw == d, round(min_haqi/0.5)*0.5], sev_prop := sev_haqi_floor]
+  if(d %in% paste0("draw_", seq(99, 999, 100))){print(d)}
 }
 
-interpolation_betas[,.(mean(haqi_beta), quantile(haqi_beta, 0.025), quantile(haqi_beta, 0.975))]
+pred_matrix[, sum_prop := sum(sev_prop), by = c("draw", "haqi")]
+pred_matrix[, sev_prop := sev_prop / sum_prop] # just to correct some that are 0.999999999999999 due to rounding
 
 line_plot <- copy(pred_matrix)
-line_plot[, `:=` (mean = mean(adj_factor), lower = quantile(adj_factor, 0.025), upper = quantile(adj_factor, 0.975)), by = "haqi"]
-line_plot <- unique(line_plot[,.(haqi, adj_factor = mean, lower, upper)])
+line_plot[, `:=` (mean = mean(sev_prop), lower = quantile(sev_prop, 0.025), upper = quantile(sev_prop, 0.975)), by = c("haqi", "severity")]
+line_plot <- unique(line_plot[,.(HAQI = haqi, Severity = ifelse(severity == 0, "Asymptomatic", ifelse(severity == 1, "Mild", ifelse(severity == 2, "Moderate", "Severe"))), Proportion = mean, lower, upper)])
 
-plot <- ggplot(data=line_plot, aes(x=haqi, y=adj_factor))+
-  geom_line(size=1, color="blue") +
-  geom_ribbon(data= line_plot, aes(x=haqi, ymin=lower, ymax=upper),  fill="blue", alpha=.3) +
+plot <- ggplot(data=line_plot, aes(x=HAQI, y=Proportion, color = Severity))+
+  geom_line(size=2) +
+  geom_ribbon(data= line_plot, aes(x=HAQI, ymin=lower, ymax=upper, color = Severity), alpha=.1) +
   scale_x_continuous(expand = c(0, 0), breaks = seq(0, 100, 10), limits = c(0, 101)) +
-  scale_y_continuous(expand = c(0, 0), breaks = seq(0.5, 1.1, 0.1),  limits = c(0.5, 1.1))+
-  ylab("Adjustment factor to sequela-weighted disability weight") +
-  xlab("Healthcare access quality index") +
+  scale_y_continuous(expand = c(0, 0), breaks = seq(0.0, 1, 0.1),  limits = c(0, 1))+
+  ylab("Proportion of anxiety disorder cases") +
+  xlab("Healthcare Access Quality Index") +
   theme(axis.line=element_line(colour="black"),
         legend.title=element_blank())
 plot
 ggsave(plot, filename="/FILEPATH/adjust_factor.pdf", width = 8, height = 6)
+
 
 # Estimate burden ---------------------------------------------------------
 library(dplyr)
@@ -264,6 +287,8 @@ countries <- location_metadata[level == 3, location_id]
 
 prevalence <- get_draws(year_id = 2019, gbd_id_type = "cause_id", gbd_id = 571, source = "como", decomp_step = 'step5', gbd_round_id = 6, version_id = 470, metric_id = 3, sex_id = 3, measure_id = 5, age_group_id = 22, location_id = countries)
 prevalence <- melt.data.table(prevalence, id.vars = names(prevalence)[!(names(prevalence) %like% "draw")], value.name="prev", variable.name="draw")
+
+set.seed(645823) # reset seed
 
 haqi_by_country <- get_covariate_estimates(covariate_id = 1099, location_id = countries, year_id = 2019, gbd_round_id = 6, decomp_step = "step4")
 haqi_by_country[, (paste0("draw_", 0:999)) := as.list(rnorm(n = 1000, mean = mean_value, sd = (upper_value - lower_value)/(qnorm(0.975, 0, 1)*2))), by = "location_id"]
@@ -275,9 +300,15 @@ prevalence[, haqi := (5*round((haqi*10)/5))/10]
 
 prevalence <- merge(prevalence, pred_matrix, all.x = T, by = c("haqi", "draw"))
 
-prevalence <- merge(prevalence, raw_dws, all.x = T, by = "draw") # merge with raw DWs
+prevalence <- merge(prevalence, unique(anxiety_dws[, .(draw, severity, dw)]), all.x = T, by = c("draw", "severity")) # merge with healthstate-specific DWs
+prevalence[, adj_dw := sev_prop * dw]
+prevalence[, adj_dw := sum(adj_dw), by = c("draw", "location_id")]
+prevalence[, (c("sum_prop", "dw")) := NULL]
+prevalence[, severity := paste0("sev_prop_", severity)]
 
-prevalence[, adj_dw := raw_dw / adj_factor] # estimate haqi-specific DWs
+prevalence <- dcast(prevalence, ...~severity, value.var="sev_prop")
+
+prevalence <- merge(prevalence, raw_dws, all.x = T, by = "draw") # merge with raw DWs
 
 prevalence <- merge(prevalence, fcot_dws, all.x = T, by = "draw") # merge with fcot DWs
 
@@ -291,7 +322,7 @@ prevalence <- merge(prevalence, location_metadata[,.(location_id, super_region_n
 
 best_haqi <- unique(haqi_by_country[mean_value == max(mean_value),location_id])
 
-best_dw <- prevalence[location_id == best_haqi, .(draw, best_dw = adj_dw)]
+best_dw <- unique(prevalence[location_id == best_haqi, .(draw, best_dw = adj_dw)])
 
 prevalence <- merge(prevalence, best_dw, all.x = T, by = "draw")
 
@@ -307,9 +338,10 @@ prevalence[, `:=` (cases_global = sum(cases), population_global = sum(population
 
 super_region_data <- unique(prevalence[,.(super_region_name, population = population_super_region, raw_yld = raw_yld_super_region, worst_yld = worst_yld_super_region, adj_yld = adj_yld_super_region, best_yld = best_yld_super_region, fcot_yld = fcot_yld_super_region, draw)])
 super_region_data[, `:=` (averted_yld = (worst_yld - adj_yld)/worst_yld, brc_yld = (adj_yld - best_yld)/worst_yld, fcot_yld = (best_yld - fcot_yld)/worst_yld)]
+super_region_data[averted_yld < 0, `:=` (averted_yld = 0)]
 super_region_data[, `:=` (unavoidable_yld = 1 - averted_yld - brc_yld - fcot_yld)]
 
-super_region_data[,.(averted_yld = mean(averted_yld), averted_lower = quantile(averted_yld, 0.025), averted_upper = quantile(averted_yld, 0.975)), by = "super_region_name"]
+super_region_data[,.(averted_yld = round(mean(averted_yld)*100,1), averted_lower = round(quantile(averted_yld, 0.025)*100,1), averted_upper = round(quantile(averted_yld, 0.975)*100, 1)), by = "super_region_name"]
 super_region_data[,.(brc_yld = mean(brc_yld), brc_lower = quantile(brc_yld, 0.025), brc_upper = quantile(brc_yld, 0.975)), by = "super_region_name"]
 super_region_data[,.(fcot_yld = mean(fcot_yld), fcot_lower = quantile(fcot_yld), fcot_upper = quantile(fcot_yld, 0.975)), by = "super_region_name"]
 super_region_data[,.(remaining_yld = mean(worst_yld), remaining_lower = quantile(worst_yld, 0.025), remaining_upper = quantile(worst_yld, 0.975)), by = "super_region_name"]
@@ -338,19 +370,19 @@ gg<-ggplot(data=super_region_data_summary)+
   xlab("GBD super region")+
   scale_fill_manual(values=c("darkorange", "#9BC53D","#00A5CE","#006594"))
 gg
-ggsave(gg, filename="/FILEPATH/ylds_by_super_region.pdf", width = 10, height = 6)
+ggsave(gg, filename="/FILEPATH/figure_3.pdf", width = 10, height = 6)
 
 global_data <- unique(prevalence[,.(population = population_global, raw_yld = raw_yld_global, worst_yld = worst_yld_global, adj_yld = adj_yld_global, best_yld = best_yld_global, fcot_yld = fcot_yld_global, draw)])
 global_data[, `:=` (averted_yld = (worst_yld - adj_yld)/worst_yld, brc_yld = (adj_yld - best_yld)/worst_yld, fcot_yld = (best_yld - fcot_yld)/worst_yld)]
 global_data[, `:=` (unavoidable_yld = 1 - averted_yld - brc_yld - fcot_yld)]
 
-global_data[,.(averted_yld = mean(averted_yld), averted_lower = quantile(averted_yld, 0.025), averted_upper = quantile(averted_yld, 0.975))]
+global_data[,.(averted_yld = round(mean(averted_yld)*100, 1), averted_lower = round(quantile(averted_yld, 0.025)*100, 1), averted_upper = round(quantile(averted_yld, 0.975)*100, 1))]
 global_data[,.(brc_yld = mean(brc_yld), brc_lower = quantile(brc_yld, 0.025), brc_upper = quantile(brc_yld, 0.975))]
 global_data[,.(fcot_yld = mean(fcot_yld), fcot_lower = quantile(fcot_yld), fcot_upper = quantile(fcot_yld, 0.975))]
 global_data[,.(remaining_yld = mean(worst_yld), remaining_lower = quantile(worst_yld, 0.025), remaining_upper = quantile(worst_yld, 0.975))]
 
-global_data[,.(total_BRC = mean(brc_yld+averted_yld), lower = quantile(brc_yld+averted_yld, 0.025), upper = quantile(brc_yld+averted_yld, 0.975))]
-global_data[,.(total_FCOT = mean(fcot_yld+brc_yld+averted_yld), lower = quantile(fcot_yld+brc_yld+averted_yld, 0.025), upper = quantile(fcot_yld+brc_yld+averted_yld, 0.975))]
+global_data[,.(total_BRC = round(mean(brc_yld+averted_yld)*100, 1), lower = round(quantile(brc_yld+averted_yld, 0.025)*100, 1), upper = round(quantile(brc_yld+averted_yld, 0.975)*100,1))]
+global_data[,.(total_FCOT = round(mean(fcot_yld+brc_yld+averted_yld)*100, 1), lower = round(quantile(fcot_yld+brc_yld+averted_yld, 0.025)*100, 1), upper = round(quantile(fcot_yld+brc_yld+averted_yld, 0.975)*100, 1))]
 
 # Create table with country-level estimates -------------------------------
 
@@ -364,32 +396,8 @@ prevalence[, `:=` (haqi_region = sum(haqi * population)/population_region), by =
 prevalence[, `:=` (haqi_super_region = sum(haqi * population)/population_super_region), by = c("draw", "super_region_name")]
 prevalence[, `:=` (haqi_global = sum(haqi * population)/population_global), by = "draw"]
 
-raw_sev_props <- dcast(anxiety_dws[,.(draw, severity, sev_prop)], ...~severity, value.var="sev_prop")
-names(raw_sev_props) <- c("draw", "raw_asymp_prop", "raw_mild_prop", "raw_mod_prop", "raw_sev_prop")
-raw_sev_dws <- dcast(anxiety_dws[,.(draw, severity, dw)], ...~severity, value.var="dw")
-names(raw_sev_dws) <- c("draw", "asymp_dw", "mild_dw", "mod_dw", "sev_dw")
-
-prevalence <- merge(prevalence, raw_sev_props, by = "draw")
-prevalence <- merge(prevalence, raw_sev_dws, by = "draw")
-prevalence[, `:=` (dw_diff = mild_dw * (raw_mild_prop/adj_factor) + mod_dw * (raw_mod_prop/adj_factor) + sev_dw * (raw_sev_prop/adj_factor) + asymp_dw * (1-(raw_mild_prop+raw_mod_prop+raw_sev_prop)/adj_factor) - raw_dw/adj_factor) ]
-prevalence[, `:=` (p_diff = dw_diff / (asymp_dw - sev_dw)) ]
-prevalence[, `:=` (adj_mild_prop = raw_mild_prop/adj_factor, adj_mod_prop = raw_mod_prop/adj_factor, adj_sev_prop = raw_sev_prop/adj_factor + p_diff)]
-prevalence[, `:=` (adj_asymp_prop = 1 - adj_mild_prop - adj_mod_prop - adj_sev_prop)]
-
-## Correct draws where asymptomatic proportions are negative
-prevalence[adj_asymp_prop < 0, dw_diff_2 := mod_dw * adj_mod_prop + sev_dw * adj_sev_prop + mild_dw * (1- adj_mod_prop - adj_sev_prop) - adj_dw]
-prevalence[adj_asymp_prop < 0, p_diff_2 := dw_diff_2 / (mild_dw - sev_dw)]
-prevalence[adj_asymp_prop < 0, adj_sev_prop := adj_sev_prop + p_diff_2]
-prevalence[adj_asymp_prop < 0, `:=` (adj_asymp_prop = 0, adj_mild_prop = 1-adj_mod_prop-adj_sev_prop)]
-
-## Correct draws where mild proportions are negative
-prevalence[adj_mild_prop < 0, dw_diff_3 := sev_dw * adj_sev_prop + mod_dw * (1- adj_sev_prop) - adj_dw]
-prevalence[adj_mild_prop < 0, p_diff_3 := dw_diff_3 / (mod_dw - sev_dw)]
-prevalence[adj_mild_prop < 0, adj_sev_prop := adj_sev_prop + p_diff_3]
-prevalence[adj_mild_prop < 0, `:=` (adj_mild_prop = 0, adj_mod_prop = 1-adj_sev_prop)]
-
-pres_results_1 <- function(m){return(paste0(sprintf("%.1f", mean(m)), " (", sprintf("%.1f", quantile(m, 0.025)), "–", sprintf("%.1f", quantile(m, 0.975)), ")"))}
-pres_results_3 <- function(m){return(paste0(sprintf("%.3f", mean(m)), " (", sprintf("%.3f", quantile(m, 0.025)), "–", sprintf("%.3f", quantile(m, 0.975)), ")"))}
+pres_results_1 <- function(m){return(paste0(sprintf("%.1f", mean(m)), " (", sprintf("%.1f", quantile(m, 0.025)), "â", sprintf("%.1f", quantile(m, 0.975)), ")"))}
+pres_results_3 <- function(m){return(paste0(sprintf("%.3f", mean(m)), " (", sprintf("%.3f", quantile(m, 0.025)), "â", sprintf("%.3f", quantile(m, 0.975)), ")"))}
 
 region_table <- unique(prevalence[,.(location_name = region_name, haqi = pres_results_1(haqi_region), raw_dw = pres_results_3(raw_dw), adj_dw = pres_results_3(adj_dw_region), dw_change_percent = pres_results_1(dw_change_percent_region)), by = "region_name"])
 super_region_table <- unique(prevalence[,.(location_name = super_region_name, haqi = pres_results_1(haqi_super_region), raw_dw = pres_results_3(raw_dw), adj_dw = pres_results_3(adj_dw_super_region), dw_change_percent = pres_results_1(dw_change_percent_super_region)), by = "super_region_name"])
@@ -403,12 +411,12 @@ country_table <- unique(prevalence[,.(haqi = pres_results_1(haqi), raw_dw = pres
 country_table <- merge(country_table, location_metadata[,.(location_id, lancet_label, sort_order)], by = "location_id")
 
 final_table <- rbind(country_table, region_table, super_region_table, global_table, fill = T)
-final_table <- final_table[order(sort_order), .(Location = lancet_label, HAQI = gsub("\\.", "·", haqi), `Original DW` = gsub("\\.", "·", raw_dw), `Adjusted DW` = gsub("\\.", "·", adj_dw), `DW % change` = gsub("\\.", "·", dw_change_percent))]
+final_table <- final_table[order(sort_order), .(Location = lancet_label, HAQI = gsub("\\.", "Â·", haqi), `Original DW` = gsub("\\.", "Â·", raw_dw), `Adjusted DW` = gsub("\\.", "Â·", adj_dw), `DW % change` = gsub("\\.", "Â·", dw_change_percent))]
 final_table[, duplicate := seq_len(.N), by = "Location"]
 final_table <- final_table[duplicate == 1,]
 final_table[, duplicate := NULL]
 
-write.xlsx(final_table, "/FILEPATH/appdendix_table.xlsx")
+write.xlsx(final_table, "/FILEPATH/table_s3.xlsx")
 
 prevalence[, dw_mean := mean(adj_dw), by = "location_id"]
 location_metadata[location_id == unique(prevalence[dw_mean == min(dw_mean),location_id]), location_name]
@@ -418,6 +426,8 @@ final_table[num == min(num),]
 final_table[num == max(num),]
 
 # Create table with country-level severity splits -------------------------------
+setnames(prevalence, paste0("sev_prop_", c(0:3)), c("adj_asymp_prop", "adj_mild_prop", "adj_mod_prop", "adj_sev_prop"))
+
 prevalence[, `:=` (asymp_region = sum(adj_asymp_prop * population)/population_region,
                    mild_region = sum(adj_mild_prop * population)/population_region,
                    mod_region = sum(adj_mod_prop * population)/population_region,
@@ -433,7 +443,7 @@ prevalence[, `:=` (asymp_global = sum(adj_asymp_prop * population)/population_gl
                    mod_global = sum(adj_mod_prop * population)/population_global,
                    sev_global = sum(adj_sev_prop*population)/population_global), by = c("draw")]
 
-pres_results_prop <- function(m){return(paste0(sprintf("%.1f", mean(m)*100), " (", sprintf("%.1f", quantile(m, 0.025)*100), "–", sprintf("%.1f", quantile(m, 0.975)*100), ")"))}
+pres_results_prop <- function(m){return(paste0(sprintf("%.1f", mean(m)*100), " (", sprintf("%.1f", quantile(m, 0.025)*100), "â", sprintf("%.1f", quantile(m, 0.975)*100), ")"))}
 
 region_table_sev <- unique(prevalence[,.(location_name = region_name, Asymptomatic = pres_results_prop(asymp_region), Mild = pres_results_prop(mild_region), Moderate = pres_results_prop(mod_region), Severe = pres_results_prop(sev_region)), by = "region_name"])
 super_region_table_sev <- unique(prevalence[,.(location_name = super_region_name, Asymptomatic = pres_results_prop(asymp_super_region), Mild = pres_results_prop(mild_super_region), Moderate = pres_results_prop(mod_super_region), Severe = pres_results_prop(sev_super_region)), by = "super_region_name"])
@@ -451,7 +461,8 @@ final_table_sev <- final_table_sev[order(sort_order), .(Location = lancet_label,
 final_table_sev[, duplicate := seq_len(.N), by = "Location"]
 final_table_sev <- final_table_sev[duplicate == 1,]
 final_table_sev[, duplicate := NULL]
-final_table_sev[, `:=` (Asymptomatic = gsub("\\.", "·", Asymptomatic), Mild = gsub("\\.", "·", Mild), Moderate = gsub("\\.", "·", Moderate), Severe = gsub("\\.", "·", Severe))]
+final_table_sev[, `:=` (Asymptomatic = gsub("\\.", "Â·", Asymptomatic), Mild = gsub("\\.", "Â·", Mild), Moderate = gsub("\\.", "Â·", Moderate), Severe = gsub("\\.", "Â·", Severe))]
 
-write.xlsx(final_table_sev, "/FILEPATH/appdendix_table_severity.xlsx")
+write.xlsx(final_table_sev, "/FILEPATH/table_s4.xlsx")
+
 
