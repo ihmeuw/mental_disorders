@@ -22,15 +22,6 @@ fit1 <- run_mr_brt(
     cov_info("d_cognitive_therapy", "X"),
     cov_info("d_behavioural_therapy", "X"),
     cov_info("d_antidepressants", "X"),
-    cov_info("d_antipsychotics", "X"),
-    cov_info("d_azapirones", "X"),
-    cov_info("d_anticonvulsants", "X"),
-    cov_info("d_benzodiazepines", "X"),
-    cov_info("d_neurokinin", "X"),
-    cov_info("d_betablocker", "X"),
-    cov_info("d_lithium", "X"),
-    cov_info("d_antihistamine", "X"),
-    cov_info("d_cycloserine", "X"),
     cov_info("d_psychodynamic", "X"),
     cov_info("d_supportive", "X")),
   remove_x_intercept = TRUE,
@@ -43,16 +34,12 @@ fit1 <- run_mr_brt(
 check_for_outputs(fit1)
 results1 <- load_mr_brt_outputs(fit1)
 df_pred1 <- expand.grid(d_cognitive_therapy = c(0,1), d_behavioural_therapy = c(0, 1), d_antidepressants = c(0,1),
-                        d_antipsychotics = c(0, 1), d_azapirones = c(0, 1), d_anticonvulsants = c(0, 1),
-                        d_benzodiazepines = c(0, 1), d_neurokinin = c(0, 1), d_betablocker = c(0, 1), d_lithium = c(0, 1),
-                        d_antihistamine = c(0, 1), d_cycloserine = c(0, 1), d_psychodynamic = c(0, 1), d_supportive = c(0, 1)
+                        d_psychodynamic = c(0, 1), d_supportive = c(0, 1)
 )
 pred1 <- as.data.table(predict_mr_brt(fit1, newdata = df_pred1)["model_summaries"])
 
 df_optimal <- expand.grid(d_cognitive_therapy = 1, d_behavioural_therapy = 1, d_antidepressants = 1,
-                d_antipsychotics = 0, d_azapirones = 0, d_anticonvulsants = 0,
-                d_benzodiazepines = 0, d_neurokinin = 0, d_betablocker = 0, d_lithium = 0,
-                d_antihistamine = 0, d_cycloserine = 0, d_psychodynamic = 0, d_supportive = 0)
+                 d_psychodynamic = 0, d_supportive = 0)
 
 pred_optimal <- as.data.table(predict_mr_brt(fit1, newdata = df_optimal)["model_summaries"])
 pred_optimal[,.(mean = model_summaries.Y_mean, lower = model_summaries.Y_mean_lo, upper = model_summaries.Y_mean_hi)]
